@@ -15,6 +15,8 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix
 from collections import Counter
+import mlflow
+import mlflow.pytorch
 
 dataset_path = r"/ceph/home/student.aau.dk/rk33gs/my_datasets/miniprojekt_dataset"
 
@@ -243,3 +245,4 @@ plt.legend()
 
 plt.savefig('loss_plot.png', dpi=300, bbox_inches='tight')
 plt.close()
+
