@@ -1,0 +1,6 @@
+torch 2.9.0+cpu
+torchvision 0.24.0+cpu
+matplotlib 3.9.2
+Pillow 10.4.0
+numpy 1.26.4
+scikit-learn 1.5.2
