@@ -18,6 +18,8 @@ from collections import Counter
 import mlflow
 import mlflow.pytorch
 
+mlflow.set_experiment("resnet50-emotion-classifier")
+
 dataset_path = r"/ceph/home/student.aau.dk/rk33gs/my_datasets/miniprojekt_dataset"
 
 
@@ -159,90 +161,122 @@ train_loss_list = []
 val_loss_list = []
 
 epochs = 15
-best_acc = 0.0
-for epoch in range(epochs):
-    print(f"epoch {epoch+1}/{epochs}")
-    running_train_loss = 0.0
-    running_train_corrects = 0.0
+
+with mlflow.start_run():
+
+    mlflow.log_param("model", "resnet50")
+    mlflow.log_param("epochs", epochs)
+    mlflow.log_param("optimizer", "AdamW")
+    mlflow.log_param("batch_size", 32)
+    mlflow.log_param("learning_rate", 1e-4)
+            
+    best_acc = 0.0
+    for epoch in range(epochs):
+        print(f"epoch {epoch+1}/{epochs}")
+        running_train_loss = 0.0
+        running_train_corrects = 0.0
 
 
-    model.train()
-    for X_train, y_train in train_dataloader:
-        X_train = X_train.to(device)
-        y_train = y_train.to(device)
+        model.train()
+        for X_train, y_train in train_dataloader:
+            X_train = X_train.to(device)
+            y_train = y_train.to(device)
 
-        optimizer.zero_grad()
+            optimizer.zero_grad()
 
-        output_train = model(X_train)
-        train_loss = criterion(output_train, y_train)
-        train_loss.backward()
-        optimizer.step()
-        scheduler.step()
+            output_train = model(X_train)
+            train_loss = criterion(output_train, y_train)
+            train_loss.backward()
+            optimizer.step()
+            scheduler.step()
 
-        _, preds = torch.max(output_train, 1)
-        running_train_corrects += torch.sum(preds == y_train.data).item()
-        running_train_loss += train_loss.item()
+            _, preds = torch.max(output_train, 1)
+            running_train_corrects += torch.sum(preds == y_train.data).item()
+            running_train_loss += train_loss.item()
 
-    train_epoch_acc = running_train_corrects / len(train_set)
-    train_epoch_loss = running_train_loss / len(train_dataloader)
-    train_loss_list.append(train_epoch_loss)
-    print(f"Training loss: {train_epoch_loss:.4f} Training accuracy: {train_epoch_acc:.4f}")
+        train_epoch_acc = running_train_corrects / len(train_set)
+        train_epoch_loss = running_train_loss / len(train_dataloader)
+        train_loss_list.append(train_epoch_loss)
+        print(f"Training loss: {train_epoch_loss:.4f} Training accuracy: {train_epoch_acc:.4f}")
 
 
+        model.eval()
+        running_val_loss = 0.0
+        running_val_corrects = 0.0
+        with torch.no_grad():
+            for X_val, y_val in val_dataloader:
+                X_val = X_val.to(device)
+                y_val = y_val.to(device)
+                output_val = model(X_val)
+                val_loss = criterion(output_val, y_val)
+                running_val_loss += val_loss.item()
+
+                _, preds = torch.max(output_val, 1)
+                running_val_corrects += torch.sum(preds == y_val.data).item()
+
+        val_epoch_acc = running_val_corrects / len(val_set)
+        val_epoch_loss = running_val_loss / len(val_dataloader)
+        val_loss_list.append(val_epoch_loss)
+
+        print(f"Validation loss: {val_epoch_loss:.4f} Validation accuracy: {val_epoch_acc:.4f}")
+
+        if val_epoch_acc > best_acc:
+            best_acc = val_epoch_acc
+            best_model_state = model.state_dict()
+            torch.save(best_model_state, "best_resnet50_emotion1.pth")
+
+    print(f"Best evaluation accuracy", best_acc)
+
+    mlflow.log_metric("best_val_accuracy", best_acc)
+
+    model.load_state_dict(best_model_state)
     model.eval()
-    running_val_loss = 0.0
-    running_val_corrects = 0.0
+
+    all_preds = []
+    all_labels = []
+
     with torch.no_grad():
         for X_val, y_val in val_dataloader:
             X_val = X_val.to(device)
             y_val = y_val.to(device)
-            output_val = model(X_val)
-            val_loss = criterion(output_val, y_val)
-            running_val_loss += val_loss.item()
+            output = model(X_val)
+            _, preds = torch.max(output, 1)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(y_val.cpu().numpy())
 
-            _, preds = torch.max(output_val, 1)
-            running_val_corrects += torch.sum(preds == y_val.data).item()
+    report = classification_report(
+        all_labels,
+        all_preds,
+        target_names=classes_to_idx.keys(),
+        output_dict=True)
 
-    val_epoch_acc = running_val_corrects / len(val_set)
-    val_epoch_loss = running_val_loss / len(val_dataloader)
-    val_loss_list.append(val_epoch_loss)
+    accuracy = report["accuracy"]
 
-    print(f"Validation loss: {val_epoch_loss:.4f} Validation accuracy: {val_epoch_acc:.4f}")
+    mlflow.log_metric("final_val_accuracy", accuracy)
 
-    if val_epoch_acc > best_acc:
-        best_acc = val_epoch_acc
-        best_model_state = model.state_dict()
-        torch.save(best_model_state, "best_resnet50_emotion1.pth")
+    print(classification_report(
+        all_labels,
+        all_preds,
+        target_names=classes_to_idx.keys()))
 
-print(f"Best evaluation accuracy", best_acc)
-model.load_state_dict(best_model_state)
-model.eval()
+    #cm = confusion_matrix(all_labels, all_preds)
+    #print("Confusion Matrix (rows = true labels, columns = predicted labels):")
+    #print(np.array2string(cm, separator=', '))
 
-all_preds = []
-all_labels = []
+    plt_epochs = range(1, epochs + 1)
+    plt.plot(plt_epochs, train_loss_list, label='Train Loss')
+    plt.plot(plt_epochs, val_loss_list, label='Validation Loss')
 
-with torch.no_grad():
-    for X_val, y_val in val_dataloader:
-        output = model(X_val.to(device))
-        _, preds = torch.max(output, 1)
-        all_preds.extend(preds.cpu().numpy())
-        all_labels.extend(y_val.cpu().numpy())
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
 
-print(classification_report(all_labels, all_preds, target_names=classes_to_idx.keys()))
+    plt.savefig('loss_plot.png', dpi=300, bbox_inches='tight')
+    plt.close()
 
-cm = confusion_matrix(all_labels, all_preds)
-print("Confusion Matrix (rows = true labels, columns = predicted labels):")
-print(np.array2string(cm, separator=', '))
+    mlflow.log_artifact("loss_plot.png")
 
-plt_epochs = range(1, epochs + 1)
-plt.plot(plt_epochs, train_loss_list, label='Train Loss')
-plt.plot(plt_epochs, val_loss_list, label='Validation Loss')
+    mlflow.log_artifact("best_resnet50_emotion1.pth")
 
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.title('Training and Validation Loss')
-plt.legend()
-
-plt.savefig('loss_plot.png', dpi=300, bbox_inches='tight')
-plt.close()
-
+    mlflow.pytorch.log_model(model, "model")
