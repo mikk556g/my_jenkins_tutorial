@@ -17,6 +17,7 @@ from sklearn.metrics import classification_report, confusion_matrix
 from collections import Counter
 import mlflow
 import mlflow.pytorch
+import time
 
 mlflow.set_experiment("resnet50-emotion-classifier")
 
@@ -164,6 +165,8 @@ epochs = 15
 
 with mlflow.start_run():
 
+    start_time = time.time()
+
     mlflow.log_param("model", "resnet50")
     mlflow.log_param("epochs", epochs)
     mlflow.log_param("optimizer", "AdamW")
@@ -223,7 +226,6 @@ with mlflow.start_run():
         if val_epoch_acc > best_acc:
             best_acc = val_epoch_acc
             best_model_state = model.state_dict()
-            torch.save(best_model_state, "best_resnet50_emotion1.pth")
 
     print(f"Best evaluation accuracy", best_acc)
 
@@ -259,10 +261,6 @@ with mlflow.start_run():
         all_preds,
         target_names=classes_to_idx.keys()))
 
-    #cm = confusion_matrix(all_labels, all_preds)
-    #print("Confusion Matrix (rows = true labels, columns = predicted labels):")
-    #print(np.array2string(cm, separator=', '))
-
     plt_epochs = range(1, epochs + 1)
     plt.plot(plt_epochs, train_loss_list, label='Train Loss')
     plt.plot(plt_epochs, val_loss_list, label='Validation Loss')
@@ -277,6 +275,25 @@ with mlflow.start_run():
 
     mlflow.log_artifact("loss_plot.png")
 
-    mlflow.log_artifact("best_resnet50_emotion1.pth")
+    end_time = time.time()
+    training_duration = end_time - start_time
+    mlflow.log_metric("training_duration_seconds", training_duration)
+    print(f"Training completed in {training_duration:.2f} seconds")
 
-    mlflow.pytorch.log_model(model, "model")
+    mlflow.pytorch.log_model(
+        model,
+        artifact_path="model",
+        registered_model_name="resnet50-emotion-classifier")
+
+    # Transition the newly registered model to Staging automatically
+    from mlflow.tracking import MlflowClient
+
+    client = MlflowClient()
+    latest_version_info = client.get_latest_versions("resnet50-emotion-classifier", stages=["None"])[0]
+    client.transition_model_version_stage(
+        name="resnet50-emotion-classifier",
+        version=latest_version_info.version,
+        stage="Staging",
+        archive_existing_versions=False  # optional
+    )
+    print(f"Model version {latest_version_info.version} moved to Staging.")
