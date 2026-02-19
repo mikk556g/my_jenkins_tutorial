@@ -9,6 +9,7 @@ from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import seaborn as sea
 import os
 from PIL import Image
 import numpy as np
@@ -17,7 +18,11 @@ from sklearn.metrics import classification_report, confusion_matrix
 from collections import Counter
 from itertools import chain
 from torch.utils.data import WeightedRandomSampler
+import mlflow
+import mlflow.pytorch
+from mlflow.tracking import MlflowClient
 
+mlflow.set_experiment("resnet50-emotion-classifier")
 
 dataset_path = r"/ceph/home/student.aau.dk/rk33gs/my_datasets/miniprojekt_dataset"
 
@@ -99,42 +104,70 @@ else:
 print(f"Using device: {device}")
 
 
+with mlflow.start_run(run_name="evaluation"):
+    
+    client = MlflowClient()
+    latest_version_info = client.get_latest_versions(
+        "resnet50-emotion-classifier", stages=["Staging"])[0]
+    model = mlflow.pytorch.load_model(f"models:/resnet50-emotion-classifier/{latest_version_info.version}")
+    model = model.to(device)
+    model.eval()
 
-model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+    all_preds = []
+    all_labels = []
 
-for param in model.parameters():
-    param.requires_grad = False
+    with torch.no_grad():
+        for X_test, y_test in test_dataloader:
+            X_test = X_test.to(device)
+            y_test = y_test.to(device)
+            output = model(X_test)
+            _, preds = torch.max(output, 1)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(y_test.cpu().numpy())
 
-for param in model.layer4.parameters():
-    param.requires_grad = True
+    report = classification_report(
+            all_labels,
+            all_preds,
+            target_names=classes_to_idx.keys(),
+            output_dict=True)
 
-model.fc = nn.Sequential(
-    nn.Dropout(p=0.4),
-    nn.Linear(model.fc.in_features, 256),
-    nn.ReLU(),
-    nn.Dropout(p=0.3),
-    nn.Linear(256, 7)
-)
+    accuracy = report["accuracy"]
 
-for param in model.fc.parameters():
-        param.requires_grad = True
+    mlflow.log_metric("test_accuracy", accuracy)
 
-model.load_state_dict(torch.load("best_resnet50_emotion1.pth", map_location=device))
-model = model.to(device)
-model.eval()
+    print(f"Test Accuracy: {accuracy}")
 
-all_preds = []
-all_labels = []
+    if accuracy < 0.70:
+        raise ValueError("Model performance below threshold!")
+    else:
 
-with torch.no_grad():
-    for X_test, y_test in test_dataloader:
-        output = model(X_test.to(device))
-        _, preds = torch.max(output, 1)
-        all_preds.extend(preds.cpu().numpy())
-        all_labels.extend(y_test.cpu().numpy())
+        # Promote it to Production and archive existing Production versions
+        client.transition_model_version_stage(
+            name="resnet50-emotion-classifier",
+            version=latest_version_info.version,
+            stage="Production",
+            archive_existing_versions=True
+        )
+        print(f"Model version {latest_version_info} promoted to Production.")
 
-print(classification_report(all_labels, all_preds, target_names=classes_to_idx.keys()))
 
-cm = confusion_matrix(all_labels, all_preds)
-print("Confusion Matrix (rows = true labels, columns = predicted labels):")
-print(np.array2string(cm, separator=', '))
+    print(classification_report(
+        all_labels,
+        all_preds,
+        target_names=classes_to_idx.keys()))
+
+    cm = confusion_matrix(all_labels, all_preds)
+    plt.figure(figsize=(8, 6))
+    sea.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                xticklabels=classes_to_idx.keys(),
+                yticklabels=classes_to_idx.keys())
+
+    plt.xlabel("Predicted Label")
+    plt.ylabel("True Label")
+    plt.title("Confusion Matrix")
+
+    plt.tight_layout()
+    plt.savefig("confusion_matrix.png")
+    plt.close()
+
+    mlflow.log_artifact("confusion_matrix.png")
