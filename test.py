@@ -21,21 +21,21 @@ from torch.utils.data import WeightedRandomSampler
 import mlflow
 import mlflow.pytorch
 from mlflow.tracking import MlflowClient
+import yaml
 
 mlflow.set_experiment("resnet50-emotion-classifier")
 
-dataset_path = r"/ceph/home/student.aau.dk/rk33gs/my_datasets/miniprojekt_dataset"
+with open("test_config.yaml") as f:
+    config = yaml.safe_load(f)
+
+dataset_config = config['dataset']
+
+tranforms_config = config['transforms']
+
+dataset_path = dataset_config['dataset_path']
 
 
-classes_to_idx = {
-            "angry": 0,
-            "disgust": 1, 
-            "fear": 2, 
-            "happy": 3, 
-            "neutral": 4, 
-            "sad": 5, 
-            "surprise": 6
-            }
+classes_to_idx = config['classes']
 
 
 
@@ -52,15 +52,16 @@ for class_name, class_idx in classes_to_idx.items():
 
 
 
-train_val_paths, test_paths, train_val_labels, test_labels = train_test_split(image_path_list, image_label_list, test_size=0.1, random_state=42)
-train_paths, val_paths, train_labels, val_labels = train_test_split(train_val_paths, train_val_labels, test_size=0.11, random_state=42)
+train_val_paths, test_paths, train_val_labels, test_labels = train_test_split(image_path_list, image_label_list, test_size=dataset_config['test_size'], random_state=dataset_config['random_state'])
+train_paths, val_paths, train_labels, val_labels = train_test_split(train_val_paths, train_val_labels, test_size=dataset_config['test_size'], random_state=dataset_config['random_state'])
 
 
 val_test_transform = transforms.Compose([
-    transforms.Resize((256)),
-    transforms.CenterCrop(224),
+    transforms.Resize(size=tranforms_config['Resize']['size']),
+    transforms.CenterCrop(size=tranforms_config['CenterCrop']['size']),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    transforms.Normalize(mean=tranforms_config['Normalize']['mean'], 
+                         std=tranforms_config['Normalize']['std'])
     ])
 
 
@@ -88,18 +89,13 @@ test_set = CustomDataset(test_paths,
                          transform=val_test_transform)
 
 test_dataloader = DataLoader(test_set, 
-                             batch_size=32, 
-                             shuffle=False, 
-                             num_workers=2, 
-                             pin_memory=True)
+                             batch_size=config['batch_size'], 
+                             shuffle=config['shuffle'], 
+                             num_workers=config['num_workers'], 
+                             pin_memory=config['pin_memory'])
 
 
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-    device = torch.device("mps")
-else:
-    device = torch.device("cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print(f"Using device: {device}")
 
@@ -137,7 +133,7 @@ with mlflow.start_run(run_name="evaluation"):
 
     print(f"Test Accuracy: {accuracy}")
 
-    if accuracy < 0.70:
+    if accuracy < config['accuracy_threshold']:
         raise ValueError("Model performance below threshold!")
     else:
 
