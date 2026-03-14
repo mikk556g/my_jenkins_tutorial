@@ -18,21 +18,33 @@ from collections import Counter
 import mlflow
 import mlflow.pytorch
 import time
+import yaml
+from models.resnet50 import ResNet50FineTuned
+from optimizers.adamw import adamw
+from schedulers.onecyclelr import onecyclelr
 
 mlflow.set_experiment("resnet50-emotion-classifier")
 
-dataset_path = r"/ceph/home/student.aau.dk/rk33gs/my_datasets/miniprojekt_dataset"
+with open("train_config.yaml") as f:
+    config = yaml.safe_load(f)
+
+dataset_config = config['dataset']
+
+model_config = config['model']
+
+train_config = config['train']
+
+optimizer_config = config['optimizer']
+
+scheduler_config = config['scheduler']
+
+evaluate_config = config['evaluate']
 
 
-classes_to_idx = {
-            "angry": 0,
-            "disgust": 1,
-            "fear": 2,
-            "happy": 3,
-            "neutral": 4,
-            "sad": 5,
-            "surprise": 6
-            }
+dataset_path = dataset_config['dataset_path']
+
+
+classes_to_idx = config['classes']
 
 
 
@@ -49,26 +61,29 @@ for class_name, class_idx in classes_to_idx.items():
 
 
 
-train_val_paths, test_paths, train_val_labels, test_labels = train_test_split(image_path_list, image_label_list, test_size=0.1, random_state=42)
-train_paths, val_paths, train_labels, val_labels = train_test_split(train_val_paths, train_val_labels, test_size=0.11, random_state=42)
+train_val_paths, test_paths, train_val_labels, test_labels = train_test_split(image_path_list, image_label_list, test_size=dataset_config['test_size'], random_state=dataset_config['random_state'])
+train_paths, val_paths, train_labels, val_labels = train_test_split(train_val_paths, train_val_labels, test_size=dataset_config['test_size'], random_state=dataset_config['random_state'])
 
 
 train_transform = transforms.Compose([
-    transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
-    transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(15),
-    transforms.ColorJitter(brightness= 0.15, contrast=0.15),
+    transforms.RandomResizedCrop(size=train_config['RandomResizedCrop']['size'], 
+                                 scale=train_config['RandomResizedCrop']['scale']),
+    transforms.RandomHorizontalFlip(p=train_config['RandomHorizontalFlip']['p']),
+    transforms.RandomRotation(degrees=train_config['RandomRotation']['degrees']),
+    transforms.ColorJitter(brightness=train_config['ColorJitter']['brightness'], 
+                           contrast=train_config['ColorJitter']['contrast']),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    transforms.Normalize(mean=train_config['Normalize']['mean'], 
+                         std=train_config['Normalize']['std'])
     ])
 
 val_test_transform = transforms.Compose([
-    transforms.Resize((256)),
-    transforms.CenterCrop(224),
+    transforms.Resize(size=evaluate_config['Resize']['size']),
+    transforms.CenterCrop(size=evaluate_config['CenterCrop']['size']),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    transforms.Normalize(mean=evaluate_config['Normalize']['mean'], 
+                         std=evaluate_config['Normalize']['std'])
     ])
-
 
 
 class CustomDataset(Dataset):
@@ -97,9 +112,6 @@ val_set = CustomDataset(val_paths,
                         val_labels,
                         transform=val_test_transform)
 
-test_set = CustomDataset(test_paths,
-                         test_labels,
-                         transform=val_test_transform)
 
 class_counts = Counter(train_labels)
 num_classes = len(classes_to_idx)
@@ -107,39 +119,23 @@ total_samples = len(train_labels)
 weights = [total_samples / (num_classes * class_counts[i]) for i in range(num_classes)]
 
 
-train_dataloader = DataLoader(train_set, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
-val_dataloader = DataLoader(val_set, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
-test_dataloader = DataLoader(test_set, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
+
+train_dataloader = DataLoader(train_set, batch_size=train_config['batch_size'], 
+                              shuffle=train_config['shuffle'], 
+                              num_workers=train_config['num_workers'], 
+                              pin_memory=train_config['pin_memory'])
+
+val_dataloader = DataLoader(val_set, batch_size=train_config['batch_size'], 
+                            shuffle=evaluate_config['shuffle'], 
+                            num_workers=train_config['num_workers'], 
+                            pin_memory=evaluate_config['pin_memory'])
 
 
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-    device = torch.device("mps")
-else:
-    device = torch.device("cpu")
-
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 
-model = models.resnet50(weights="IMAGENET1K_V1")
-
-for param in model.parameters():
-    param.requires_grad = False
-
-for param in model.layer4.parameters():
-    param.requires_grad = True
-
-model.fc = nn.Sequential(
-    nn.Dropout(p=0.4),
-    nn.Linear(model.fc.in_features, 256),
-    nn.ReLU(),
-    nn.Dropout(p=0.3),
-    nn.Linear(256, 7)
-)
-
-for param in model.fc.parameters():
-        param.requires_grad = True
+model = ResNet50FineTuned(model_config)
 
 model = model.to(device)
 
@@ -147,21 +143,14 @@ class_weights = torch.tensor(weights, dtype=torch.float).to(device)
 
 criterion = nn.CrossEntropyLoss(weight=class_weights)
 
-optimizer = optim.AdamW([
-            {"params": model.layer4.parameters(), "lr": 1e-4},
-            {"params": model.fc.parameters(), "lr": 1e-4}], weight_decay=1e-4)
+optimizer = adamw(model, model_config, optimizer_config)
 
-scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer,
-                                                max_lr=1e-4,
-                                                epochs=15,
-                                                steps_per_epoch=len(train_dataloader),
-                                                pct_start=0.1,
-                                                anneal_strategy="cos")
+scheduler = onecyclelr(optimizer, scheduler_config, train_dataloader)
 
 train_loss_list = []
 val_loss_list = []
 
-epochs = 15
+epochs = train_config['epochs']
 
 with mlflow.start_run():
 
